@@ -1,48 +1,86 @@
-# LogFlow v1 Mimarisi
+# LogFlow Mimarisi
 
-## Bileşenler ve bağlantı
+## Bileşenlerin sorumlulukları
+
+| Bileşen | Sorumluluk |
+| --- | --- |
+| Source<O> | Veri üretme sözleşmesi |
+| Stage<I, O> | Bir girdiyi işleyip çıktı üretme sözleşmesi |
+| Emitter<T> | Üretilen veriyi sonraki bileşene aktarma |
+| Sink<I> | Son veriyi tüketme sözleşmesi |
+| FileLineSource | UTF-8 dosyayı satır satır okuma |
+| ParserStage | String girdiyi LogRecord nesnesine dönüştürme |
+| ConsoleSink | LogRecord alanlarını konsola yazdırma |
+| SummarySource | Kaynak tamamlandığında hatalı satır sayısını yazdırma |
+| Pipeline | Kaynak, aşamalar ve sink bağlantısını kurma |
+| Main | Argümanı alma, bileşenleri oluşturma ve çalıştırma |
+
+## v2 veri akışı
 
 ```mermaid
-flowchart LR
-    A["FileLineSource"] -->|"Emitter ile String satırları"| B["ConsoleSink"]
+flowchart TD
+    F["FileLineSource"] -->|String| P["ParserStage"]
+    P -->|LogRecord| C["ConsoleSink"]
+    P -->|Hatalı satır| I["Sayacı artır ve satırı atla"]
 ```
 
-FileLineSource dosyayı satır satır okur.
-ConsoleSink kendisine gelen satırı terminale yazdırır.
-Pipeline bu bileşenleri birbirine bağlar.
+SummarySource, FileLineSource'u sarar ve kaynak üretimi
+tamamlandığında ParserStage'in hatalı satır sayısını okur.
 
-## Sorumlulukların ayrılması
+## Pipeline bağlantısı
 
-- Dosya okuma: FileLineSource
-- Terminale yazdırma: ConsoleSink
-- Aşamaları sıralama ve bağlama: Pipeline
-- Argümanları okuma ve uygulamayı başlatma: Main
+Pipeline.from(source) başlangıç kaynağını belirler.
+then(stage), aşamayı sıralı listeye ekler ve emitter
+bağlantısını kurar.
+to(sink), son çıktıyı tüketecek bileşeni belirler.
+run(), kaynaktan başlayarak veri akışını çalıştırır.
 
-Main içinde dosya okuma veya kayıt işleme mantığı bulunmaz.
+Generik türler sayesinde ParserStage sonrasında
+Pipeline<LogRecord> elde edilir ve Sink<LogRecord>
+ile bağlantı kurulur.
 
-## Arayüz ve uygulama farkı
+StageException oluşursa Pipeline bunu
+IllegalStateException içine sararak iletir.
 
-Source, Sink, Stage ve Emitter birer arayüzdür.
-Bileşenlerin hangi işlemleri sunacağını tanımlarlar.
+## Veri modeli
 
-FileLineSource ve ConsoleSink ise bu arayüzlerin somut
-uygulamalarıdır. İşlemlerin nasıl yapılacağını belirlerler.
+LogRecord değiştirilemez bir Java record'dur.
 
-Bu sürümde bir kayıt, dosyadan okunan String satırıdır.
+timestamp, clientIp, method, path, status, bytes,
+userAgent, attributes ve raw alanlarını içerir.
 
-## Neden Emitter kullanılıyor?
+Zaman bilgisi Instant olarak tutulur.
+raw, orijinal satırın korunmasını sağlar.
+attributes, gelecekteki aşamaların ek bilgileri için ayrılmıştır
+ve Map.copyOf ile değiştirilemez hale getirilir.
 
-Bir aşama her girdiden sıfır, bir veya birden fazla çıktı
-üretebilir. Emitter, bu çıktıları ayrı ayrı iletmeyi sağlar.
-Tek bir değer döndürmek bu esnekliği sağlamaz.
+## Hata davranışı
 
-## İşlem hattı
+ParserStage hatalı girdilerde kayıt üretmez.
+Hatalı satır sayısını artırır ve sonraki satırı işlemeye devam eder.
 
-Pipeline, then metodu ile eklenen aşamaları sıralı bir listede
-saklar ve veri aktarım bağlantılarını aynı sırayla kurar.
+Geçerli bir satır tam olarak bir LogRecord üretir.
 
-v1 sürümünde ara aşama yoktur. Kaynak doğrudan sink'e bağlanır.
-Sonraki sürümde araya ParserStage eklenecektir.
+FileLineSource dosya okuma hatalarını UncheckedIOException
+olarak iletir.
 
-Stage üzerindeki open ve close metotları gelecekteki yaşam
-döngüsü işlemleri için ayrılmıştır; v1'de kullanılmaz.
+## Main'in sınırı
+
+Main log ayrıştırmaz ve kayıt alanlarını biçimlendirmez.
+Yalnızca komut satırı argümanını alır, bileşenleri
+birbirine bağlar ve run() çağrısını yapar.
+
+## Yaşam döngüsü
+
+Stage arayüzündeki open() ve close() metotları
+varsayılan olarak boş tanımlanmıştır.
+Bu sürümde Pipeline tarafından çağrılmazlar.
+
+## Test yaklaşımı
+
+Parser testleri dosya sisteminden bağımsızdır.
+Emitter olarak records::add kullanılır.
+Üretilen kayıtlar ve hatalı satır sayısı doğrulanır.
+
+JUnit 5 testleri Maven ile çalıştırılır.
+JaCoCo, otomatik testlerin kapsamını raporlar.

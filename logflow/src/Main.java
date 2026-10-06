@@ -11,7 +11,15 @@ public class Main {
 
         Path filePath = Path.of(args[0]);
 
-        Pipeline.from(new FileLineSource(filePath))
+        ParserStage parser = new ParserStage();
+
+        Source<String> source = new SummarySource<>(
+            new FileLineSource(filePath),
+            parser::getInvalidCount
+        );
+
+        Pipeline.from(source)
+                .then(parser)
                 .to(new ConsoleSink())
                 .run();
     }

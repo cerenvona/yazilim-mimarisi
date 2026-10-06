@@ -25,3 +25,5 @@ replay_pid*
 
 /logflow/out/
 !/logflow/data/access-small.log
+
+/logflow/target/
