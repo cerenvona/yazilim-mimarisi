@@ -1,147 +1,223 @@
 # LogFlow
 
-Yazılım Mimarisi dersi kapsamında aşamalı olarak geliştirilen
-bir log işleme uygulamasıdır.
+LogFlow, Yazılım Mimarisi dersi kapsamında aşamalı olarak
+geliştirilen bir log işleme uygulamasıdır.
+
+Uygulama log dosyasını okur, satırları tipli kayıtlara
+dönüştürür, yapılandırılan filtreleri uygular, seçilen alanları
+çıkarır ve sonucu yeni bir dosyaya yazar.
 
 ## Gereksinimler
 
 - JDK 17 veya üzeri
 - Maven
-- Hızlı çalıştırma betiği için Unix uyumlu terminal
+- Unix uyumlu terminal
 
 ## Sürümler
 
-- v1: Dosyadan satır okuma ve konsola yazdırma.
-- v2: Log satırlarını LogRecord nesnelerine dönüştürme,
-  hatalı satırları sayma ve parser testleri.
+- v1: Dosyadan satır okuma ve temel pipeline
+- v2: LogRecord, parser ve parser testleri
+- v3: Filtreleme, projeksiyon, FileSink ve PipelineBuilder
 
 Önceki sürümler Git etiketleri üzerinden incelenebilir.
 
-## Çalıştırma
+## Veri akışı
 
-Komutlar logflow klasöründe çalıştırılır:
-
-```bash
-./logflow data/access-small.log
+```text
+FileLineSource
+→ ParserStage
+→ PredicateFilterStage
+→ PredicateFilterStage
+→ ProjectionStage
+→ FileSink
 ```
 
-Betik kaynak kodları derler ve uygulamayı başlatır.
+Aşamalar `PipelineBuilder` ile istenen sırada ve sayıda
+bir araya getirilebilir.
 
-Alternatif olarak:
+## Derleme ve çalıştırma
 
-```bash
-mkdir -p out
-javac -d out src/*.java
-java -cp out Main data/access-small.log
-```
+Komutlar `logflow` klasöründe çalıştırılır.
 
-Mac üzerinde Java 17 seçmek gerekirse:
+Önce Java 17 seçilmesi gerekirse:
 
 ```bash
 export JAVA_HOME=$(/usr/libexec/java_home -v 17)
 export PATH="$JAVA_HOME/bin:$PATH"
 ```
 
-## Veri akışı
+Uygulamayı çalıştırma örneği:
 
-FileLineSource dosyayı satır satır okur.
-ParserStage her geçerli satırı bir LogRecord nesnesine dönüştürür.
-ConsoleSink bu nesnenin alanlarını okunabilir biçimde gösterir.
+```bash
+./logflow data/access-small.log output/errors.log \
+--min-status 400 \
+--fields timestamp,clientIp,status,path
+```
 
-SummarySource, veri akışı tamamlandıktan sonra hatalı satır
-sayısını konsola yazar.
+Hem status hem path filtresi kullanma örneği:
 
-Main yalnızca komut satırı argümanını alır, bileşenleri
-birbirine bağlar ve pipeline'ı çalıştırır.
+```bash
+./logflow data/access-small.log output/api-errors.log \
+--min-status 400 \
+--path-prefix /api \
+--fields timestamp,clientIp,status
+```
 
-## Log biçimi
+## Komut satırı seçenekleri
 
-Parser, Common Log Format satırlarını ve isteğe bağlı
-referer/user-agent alanlarını içeren Combined Log Format
-satırlarını destekler.
+| Değer veya seçenek | Açıklama |
+| --- | --- |
+| İlk değer | Okunacak log dosyası |
+| İkinci değer | Yazılacak çıktı dosyası |
+| `--min-status 400` | En düşük HTTP durum kodu |
+| `--path-prefix /api` | Yolun başlaması gereken değer |
+| `--fields status,path` | Çıktıya yazılacak alanlar |
 
-LogRecord alanları:
+Girdi ve çıktı dosyaları zorunludur.
+Diğer seçenekler isteğe bağlıdır.
 
-- timestamp: Instant türünde zaman bilgisi
-- clientIp: İstemci IP bilgisi
-- method: HTTP metodu
-- path: Sorgu parametreleri dahil istek yolu
-- status: HTTP durum kodu
-- bytes: Yanıt boyutu
-- userAgent: Varsa tarayıcı/istemci bilgisi
-- attributes: Gelecek aşamalar için genişletme alanı
-- raw: Orijinal log satırı
+`--fields` verilmezse şu alanlar kullanılır:
 
-LogRecord bir Java record olarak tanımlanmıştır.
-attributes alanı Map.copyOf ile değiştirilemez hale getirilir.
+```text
+timestamp,clientIp,status,path
+```
 
-User-agent bulunmadığında boş metin kullanılır.
-Yanıt boyutu "-" olduğunda 0 kabul edilir.
-Durum kodunun 100–599 aralığında olması beklenir.
+Kullanılabilecek alan adları:
 
-Hatalı satırlar çıktı üretmeden atlanır ve sayılır.
-Sonraki satırların işlenmesi devam eder.
+- timestamp
+- clientIp
+- method
+- path
+- status
+- bytes
+- userAgent
+- attributes
+- raw
+
+## Filtreleme
+
+`PredicateFilterStage`, constructor üzerinden verilen
+`Predicate<LogRecord>` koşulunu kullanır.
+
+Örnek koşullar:
+
+```java
+log -> log.status() >= 400
+log -> log.path().startsWith("/api")
+```
+
+Zaman aralığı filtresi de aynı aşamayla oluşturulabilir:
+
+```java
+log -> !log.timestamp().isBefore(start)
+       && log.timestamp().isBefore(end)
+```
+
+Koşulu sağlamayan kayıtlar sonraki aşamaya iletilmez.
+
+## Projeksiyon ve veri minimizasyonu
+
+`ProjectionStage`, yalnızca seçilen alanları çıktıya ekler.
+
+Örneğin:
+
+```text
+--fields clientIp,status,path
+```
+
+kullanıldığında çıktı şu biçimdedir:
+
+```text
+clientIp=192.0.2.11,status=404,path=/page/10
+```
+
+Seçilmeyen `raw`, `userAgent` ve diğer alanlar çıktı
+dosyasına yazılmaz.
+
+## FileSink yaşam döngüsü
+
+FileSink:
+
+1. `open()` ile çıktı dosyasını açar.
+2. `consume()` ile her çıktıyı ayrı satıra yazar.
+3. `close()` ile writer'ı kapatır.
+
+Pipeline, hata oluşsa bile `close()` çağrısını `finally`
+bloğu üzerinden gerçekleştirir. Böylece arabellekte kalan
+çıktıların kaybolması önlenir.
 
 ## Örnek veri
 
-data/access-small.log, 200 adet sentetik log satırı içerir.
+`data/access-small.log`, 200 sentetik log satırı içerir.
 
-Örnek dosyayla yapılan çalıştırmada hatalı satır sayısı 0'dır.
+Aşağıdaki komut 20 adet hata kaydı üretir:
+
+```bash
+./logflow data/access-small.log output/errors.log \
+--min-status 400 \
+--fields timestamp,clientIp,status,path
+```
+
+Sonucun satır sayısını kontrol etmek için:
+
+```bash
+wc -l output/errors.log
+```
 
 ## Testler
 
-JUnit 5 testleri ve JaCoCo kapsam raporu:
+Bütün testleri ve JaCoCo raporunu oluşturmak için:
 
 ```bash
 mvn clean verify
 ```
 
-Testler dosya sistemini kullanmaz. Üretilen kayıtlar,
-toplayıcı emitter olarak kullanılan records::add ile
-bellekte bir listede tutulur.
+Projede toplam 21 otomatik test bulunur.
 
-ParserStageTest içinde 13 test bulunur:
+Test edilen başlıca davranışlar:
 
-1. Geçerli satırın alanlarını doğrulama
-2. Eksik alan
-3. Hatalı zaman damgası
-4. Metin biçiminde hatalı durum kodu
-5. Boş satır
-6. Fazladan boşluklar
-7. Boşluk içeren tırnaklı user-agent
-8. Sorgu parametrelerini koruma
-9. Null girdi
-10. "-" biçimindeki yanıt boyutu
-11. Aralık dışındaki durum kodları
-12. long sınırını aşan yanıt boyutu
-13. Hatalı satırları sayma ve işlemeye devam etme
+- Geçerli ve hatalı log satırlarını ayrıştırma
+- Status filtresi
+- Path-prefix filtresi
+- Timestamp aralığı filtresi
+- Projeksiyon ve veri minimizasyonu
+- FileSink açma, yazma ve kapatma davranışı
+- Fixture üzerinde üç aşamalı entegrasyon
+- Filtre sıralamasının sonuç ve işlem sayısına etkisi
 
-## Test kapsamı
+Kapsam raporu şu konumda oluşturulur:
 
-JaCoCo raporunda ölçülen sonuçlar:
-
-| Ölçüm | Sonuç |
-| --- | --- |
-| ParserStage satır kapsamı | %100 — 38/38 satır |
-| ParserStage dal kapsamı | %100 |
-| LogRecord satır kapsamı | %100 — 3/3 satır |
-| Projenin genel satır kapsamı | %37,61 — 41/109 satır |
-
-Otomatik testler parser davranışına odaklanır.
-Dosya okuma ve konsol çıktısı örnek dosyayla manuel olarak
-kontrol edilmiştir; bu manuel çalıştırma JaCoCo test
-kapsamı hesabına dahil değildir.
-
-Raporun konumu:
-
+```text
 target/site/jacoco/index.html
+```
 
-Mac üzerinde raporu açmak için:
+Mac üzerinde açmak için:
 
 ```bash
 open target/site/jacoco/index.html
 ```
 
-out ve target klasörleri üretilen dosyaları içerir ve
-Git tarafından takip edilmez. Kapsam raporu
-mvn clean verify komutuyla yeniden oluşturulabilir.
+## Filtre sıralaması sonucu
+
+200 satırlık örnek dosyada iki filtre sırası karşılaştırılmıştır.
+
+| Sıralama | Koşul kontrolü | Çıktı |
+| --- | ---: | ---: |
+| Status → Path | 220 | 11 kayıt |
+| Path → Status | 311 | 11 kayıt |
+
+İki sıralama aynı çıktıyı üretmiştir. Daha seçici olan status
+filtresinin önce uygulanması 91 daha az koşul kontrolü
+gerektirmiştir. Deneyin ayrıntıları `ARCHITECTURE.md`
+dosyasında bulunmaktadır.
+
+## Üretilen dosyalar
+
+Aşağıdaki klasörler Git tarafından takip edilmez:
+
+- `out/`
+- `target/`
+- `output/`
+
+Bu klasörler derleme, test ve çalışma sırasında yeniden
+oluşturulabilir.

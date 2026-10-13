@@ -2,6 +2,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class Pipeline<T> {
+
     private final Source<T> source;
     private final List<Stage<?, ?>> stages;
     private Sink<T> sink;
@@ -24,7 +25,7 @@ public class Pipeline<T> {
                 stage.process(input, out);
             } catch (StageException e) {
                 throw new IllegalStateException(
-                    "Pipeline asamasinda hata olustu", e
+                        "Pipeline asamasinda hata olustu", e
                 );
             }
         });
@@ -40,10 +41,26 @@ public class Pipeline<T> {
     public void run() {
         if (sink == null) {
             throw new IllegalStateException(
-                "Pipeline icin bir sink belirlenmeli"
+                    "Pipeline icin bir sink belirlenmeli"
             );
         }
 
-        source.produce(item -> sink.consume(item));
+        for (Stage<?, ?> stage : stages) {
+            stage.open();
+        }
+
+        sink.open();
+
+        try {
+            source.produce(item -> sink.consume(item));
+        } finally {
+            try {
+                sink.close();
+            } finally {
+                for (int i = stages.size() - 1; i >= 0; i--) {
+                    stages.get(i).close();
+                }
+            }
+        }
     }
 }

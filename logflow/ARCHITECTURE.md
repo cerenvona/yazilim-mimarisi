@@ -1,86 +1,205 @@
 # LogFlow Mimarisi
 
-## Bileşenlerin sorumlulukları
+## Genel bakış
+
+LogFlow, log kayıtlarını birbirinden bağımsız ve
+birleştirilebilir aşamalar üzerinden işler.
+
+```mermaid
+flowchart TD
+    A["FileLineSource"] -->|String| B["ParserStage"]
+    B -->|LogRecord| C["PredicateFilterStage"]
+    C -->|LogRecord| D["PredicateFilterStage"]
+    D -->|LogRecord| E["ProjectionStage"]
+    E -->|String| F["FileSink"]
+```
+
+Her aşama yalnızca kendi görevinden sorumludur.
+Aşamalar `Emitter` üzerinden sonraki bileşene veri iletir.
+
+## Bileşenler
 
 | Bileşen | Sorumluluk |
 | --- | --- |
 | Source<O> | Veri üretme sözleşmesi |
-| Stage<I, O> | Bir girdiyi işleyip çıktı üretme sözleşmesi |
-| Emitter<T> | Üretilen veriyi sonraki bileşene aktarma |
-| Sink<I> | Son veriyi tüketme sözleşmesi |
+| Stage<I,O> | Girdiyi işleyip sıfır, bir veya daha fazla çıktı üretme |
+| Emitter<T> | Çıktıyı sonraki bileşene iletme |
+| Sink<I> | Son çıktıyı tüketme |
 | FileLineSource | UTF-8 dosyayı satır satır okuma |
 | ParserStage | String girdiyi LogRecord nesnesine dönüştürme |
-| ConsoleSink | LogRecord alanlarını konsola yazdırma |
-| SummarySource | Kaynak tamamlandığında hatalı satır sayısını yazdırma |
-| Pipeline | Kaynak, aşamalar ve sink bağlantısını kurma |
-| Main | Argümanı alma, bileşenleri oluşturma ve çalıştırma |
+| PredicateFilterStage | Predicate koşulunu sağlayan kayıtları iletme |
+| ProjectionStage | Yalnızca seçilen alanları String çıktıya dönüştürme |
+| FileSink | Sonuçları UTF-8 çıktı dosyasına yazma |
+| Pipeline | Aşamaları çalıştırma ve yaşam döngüsünü yönetme |
+| PipelineBuilder | Akıcı biçimde pipeline oluşturma |
+| CommandLineOptions | Komut satırı seçeneklerini ayrıştırma |
+| Main | Seçeneklere göre bileşenleri birleştirme |
 
-## v2 veri akışı
+## Bileşilebilirlik
 
-```mermaid
-flowchart TD
-    F["FileLineSource"] -->|String| P["ParserStage"]
-    P -->|LogRecord| C["ConsoleSink"]
-    P -->|Hatalı satır| I["Sayacı artır ve satırı atla"]
+`PredicateFilterStage`, filtre koşulunun kendisini bilmez.
+Koşul constructor üzerinden `Predicate<LogRecord>` olarak verilir.
+
+Aynı sınıf aşağıdaki filtrelerin tümünü oluşturabilir:
+
+```java
+log -> log.status() >= 400
+log -> log.path().startsWith("/api")
+log -> !log.timestamp().isBefore(start)
+       && log.timestamp().isBefore(end)
 ```
 
-SummarySource, FileLineSource'u sarar ve kaynak üretimi
-tamamlandığında ParserStage'in hatalı satır sayısını okur.
+Koşul sağlanırsa kayıt emit edilir. Sağlanmazsa aşama
+çıktı üretmez ve kayıt pipeline'dan elenir.
 
-## Pipeline bağlantısı
+Aşamalar `PipelineBuilder.via()` ile istenen sayıda
+birleştirilebilir:
 
-Pipeline.from(source) başlangıç kaynağını belirler.
-then(stage), aşamayı sıralı listeye ekler ve emitter
-bağlantısını kurar.
-to(sink), son çıktıyı tüketecek bileşeni belirler.
-run(), kaynaktan başlayarak veri akışını çalıştırır.
+```java
+PipelineBuilder.from(new FileLineSource(input))
+        .via(new ParserStage())
+        .via(new PredicateFilterStage(
+                log -> log.status() >= 400
+        ))
+        .via(new PredicateFilterStage(
+                log -> log.path().startsWith("/api")
+        ))
+        .via(new ProjectionStage(
+                "timestamp", "clientIp", "status"
+        ))
+        .to(new FileSink(output))
+        .run();
+```
 
-Generik türler sayesinde ParserStage sonrasında
-Pipeline<LogRecord> elde edilir ve Sink<LogRecord>
-ile bağlantı kurulur.
+Generik türler aşamalar arasındaki veri türlerini denetler.
+`ParserStage`, `String` alıp `LogRecord` üretir.
+`ProjectionStage`, `LogRecord` alıp `String` üretir.
 
-StageException oluşursa Pipeline bunu
-IllegalStateException içine sararak iletir.
+## Filtre ve dönüşüm ilişkisi
 
-## Veri modeli
+`PredicateFilterStage` bir kaydı değiştirmeden iletir veya eler.
+Bu nedenle bir girdiden sıfır ya da bir çıktı üretir.
 
-LogRecord değiştirilemez bir Java record'dur.
+`ProjectionStage` her kaydı seçilen alanlarla yeni bir metin
+çıktısına dönüştürür. Bir girdiden bir çıktı üretir.
 
-timestamp, clientIp, method, path, status, bytes,
-userAgent, attributes ve raw alanlarını içerir.
+İkisi de aynı `Stage<I,O>` mimari sözleşmesini kullanır.
+Davranışları farklı olsa da pipeline açısından ikisi de
+birer aşamadır.
 
-Zaman bilgisi Instant olarak tutulur.
-raw, orijinal satırın korunmasını sağlar.
-attributes, gelecekteki aşamaların ek bilgileri için ayrılmıştır
-ve Map.copyOf ile değiştirilemez hale getirilir.
+## Veri minimizasyonu
 
-## Hata davranışı
+ProjectionStage yalnızca `--fields` ile seçilen alanları
+çıktıya ekler. Örneğin:
 
-ParserStage hatalı girdilerde kayıt üretmez.
-Hatalı satır sayısını artırır ve sonraki satırı işlemeye devam eder.
+```text
+--fields timestamp,clientIp,status
+```
 
-Geçerli bir satır tam olarak bir LogRecord üretir.
+kullanıldığında `raw`, `userAgent`, `bytes` ve `path`
+alanları çıktı dosyasına yazılmaz.
 
-FileLineSource dosya okuma hatalarını UncheckedIOException
-olarak iletir.
+Bu yaklaşım çıktı boyutunu azaltır ve ihtiyaç duyulmayan
+bilgilerin paylaşılmasını önler.
 
-## Main'in sınırı
-
-Main log ayrıştırmaz ve kayıt alanlarını biçimlendirmez.
-Yalnızca komut satırı argümanını alır, bileşenleri
-birbirine bağlar ve run() çağrısını yapar.
+Bu uygulamada projeksiyonun çıktısı `String` olduğu için
+`LogRecord` kullanan filtreler projeksiyondan önce çalışır.
+Projeksiyon filtrelerden önce uygulanacaksa sonraki filtrenin
+ihtiyaç duyduğu alanların korunması ve farklı bir ara veri
+modeli kullanılması gerekir.
 
 ## Yaşam döngüsü
 
-Stage arayüzündeki open() ve close() metotları
-varsayılan olarak boş tanımlanmıştır.
-Bu sürümde Pipeline tarafından çağrılmazlar.
+Pipeline çalıştırılırken:
+
+1. Aşamaların `open()` metotları çağrılır.
+2. Sink'in `open()` metodu çağrılır.
+3. Kayıtlar işlenir.
+4. Sink'in `close()` metodu çağrılır.
+5. Aşamaların `close()` metotları ters sırada çağrılır.
+
+Kapatma işlemleri `finally` bloğunda yürütülür.
+Bu nedenle işleme sırasında hata oluşsa bile FileSink
+kapatılmaya çalışılır.
+
+FileSink, `open()` sırasında BufferedWriter oluşturur.
+`consume()` her çıktıyı ayrı satıra yazar.
+`close()` writer'ı kapatarak arabellekteki verileri diske aktarır.
+
+## Komut satırı yapılandırması
+
+Program aşağıdaki biçimde çalıştırılır:
+
+```bash
+./logflow <girdi> <cikti> \
+--min-status 400 \
+--path-prefix /api \
+--fields timestamp,clientIp,status
+```
+
+`--min-status` ve `--path-prefix` isteğe bağlıdır.
+Verilen her filtre pipeline'a ayrı bir
+PredicateFilterStage olarak eklenir.
+
+`--fields` verilmezse varsayılan alanlar şunlardır:
+
+```text
+timestamp,clientIp,status,path
+```
+
+## Filtre sıralaması deneyi
+
+Deney `data/access-small.log` içindeki 200 kayıt üzerinde
+iki filtre sırası kullanılarak gerçekleştirilmiştir:
+
+- Status filtresi: `status >= 400`
+- Path filtresi: `path startsWith "/page/1"`
+
+### Birinci sıra
+
+```text
+Parser → Status filtresi → Path filtresi → Projection
+```
+
+- Status filtresi 200 kaydı kontrol etti.
+- Status filtresinden 20 kayıt geçti.
+- Path filtresi 20 kaydı kontrol etti.
+- Toplam koşul kontrolü: 220.
+
+### İkinci sıra
+
+```text
+Parser → Path filtresi → Status filtresi → Projection
+```
+
+- Path filtresi 200 kaydı kontrol etti.
+- Path filtresinden 111 kayıt geçti.
+- Status filtresi 111 kaydı kontrol etti.
+- Toplam koşul kontrolü: 311.
+
+Her iki sıralama da aynı 11 kaydı ve aynı sıradaki çıktıyı
+üretti. Ancak daha seçici olan status filtresini önce
+çalıştırmak 91 daha az koşul kontrolü gerektirdi.
+
+Bu sonuç filtreler mantıksal olarak bağımsız olduğunda
+sıralamanın sonucu değiştirmediğini, fakat yapılan işi
+ve performansı değiştirebildiğini göstermektedir.
+
+Ayrıştırma işlemi filtrelerden önce yapılmalıdır çünkü
+status, path ve timestamp alanları ham String üzerinde
+tipli alanlar olarak bulunmaz.
 
 ## Test yaklaşımı
 
-Parser testleri dosya sisteminden bağımsızdır.
-Emitter olarak records::add kullanılır.
-Üretilen kayıtlar ve hatalı satır sayısı doğrulanır.
+Her yeni bileşen ayrı test edilmiştir:
 
-JUnit 5 testleri Maven ile çalıştırılır.
-JaCoCo, otomatik testlerin kapsamını raporlar.
+- PredicateFilterStage: status, path ve timestamp koşulları
+- ProjectionStage: alan seçimi, sıralama ve bilinmeyen alan
+- FileSink: açma, yazma, klasör oluşturma ve kapatma
+- PipelineIntegrationTest: fixture üzerinde Parser,
+  PredicateFilter ve Projection aşamalarının birlikte çalışması
+- FilterOrderExperimentTest: iki filtre sırasının çıktısını
+  ve koşul kontrol sayılarını karşılaştırma
+
+Testler JUnit 5 ile çalıştırılır ve JaCoCo kapsam raporu
+Maven tarafından oluşturulur.
